@@ -1,0 +1,275 @@
+// postController.js - Posts controller
+
+const Post = require('../models/Post');
+
+// Helper function to generate slug
+const generateSlug = (title) => {
+  return title
+    .toLowerCase()
+    .replace(/[^\w ]+/g, '')
+    .replace(/ +/g, '-');
+};
+
+// @desc    Get all posts
+// @route   GET /api/posts
+// @access  Public
+exports.getAllPosts = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Build query
+    const query = {};
+    
+    if (req.query.category) {
+      query.category = req.query.category;
+    }
+    
+    if (req.query.isPublished) {
+      query.isPublished = req.query.isPublished === 'true';
+    } else {
+      query.isPublished = true; // Default to published posts
+    }
+
+    // Get posts with pagination
+    const posts = await Post.find(query)
+      .populate('author', 'name email avatar')
+      .populate('category', 'name slug color')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    // Get total count for pagination
+    const total = await Post.countDocuments(query);
+
+    res.status(200).json({
+      success: true,
+      count: posts.length,
+      total,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+      data: posts,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
+
+// @desc    Get single post by ID or slug
+// @route   GET /api/posts/:id
+// @access  Public
+exports.getPost = async (req, res) => {
+  try {
+    let post;
+
+    // Check if parameter is MongoDB ObjectId or slug
+    if (req.params.id.match(/^[0-9a-fA-F]{24}$/)) {
+      post = await Post.findById(req.params.id)
+        .populate('author', 'name email avatar bio')
+        .populate('category', 'name slug color')
+        .populate('comments.user', 'name avatar');
+    } else {
+      post = await Post.findOne({ slug: req.params.id })
+        .populate('author', 'name email avatar bio')
+        .populate('category', 'name slug color')
+        .populate('comments.user', 'name avatar');
+    }
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        error: 'Post not found',
+      });
+    }
+
+    // Increment view count
+    await post.incrementViewCount();
+
+    res.status(200).json({
+      success: true,
+      data: post,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
+
+// @desc    Create new post
+// @route   POST /api/posts
+// @access  Private
+exports.createPost = async (req, res) => {
+  try {
+    // Add user to req.body
+    req.body.author = req.user.id;
+    
+    // Generate slug from title
+    req.body.slug = generateSlug(req.body.title);
+
+    const post = await Post.create(req.body);
+
+    res.status(201).json({
+      success: true,
+      data: post,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
+
+// @desc    Update post
+// @route   PUT /api/posts/:id
+// @access  Private
+exports.updatePost = async (req, res) => {
+  try {
+    let post = await Post.findById(req.params.id);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        error: 'Post not found',
+      });
+    }
+
+    // Make sure user is post owner or admin
+    if (post.author.toString() !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to update this post',
+      });
+    }
+
+    // If title is being updated, regenerate slug
+    if (req.body.title && req.body.title !== post.title) {
+      req.body.slug = generateSlug(req.body.title);
+    }
+
+    post = await Post.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: post,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
+
+// @desc    Delete post
+// @route   DELETE /api/posts/:id
+// @access  Private
+exports.deletePost = async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        error: 'Post not found',
+      });
+    }
+
+    // Make sure user is post owner or admin
+    if (post.author.toString() !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to delete this post',
+      });
+    }
+
+    await post.deleteOne();
+
+    res.status(200).json({
+      success: true,
+      data: {},
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
+
+// @desc    Add comment to post
+// @route   POST /api/posts/:id/comments
+// @access  Private
+exports.addComment = async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        error: 'Post not found',
+      });
+    }
+
+    const comment = await post.addComment(req.user.id, req.body.content);
+
+    res.status(201).json({
+      success: true,
+      data: comment,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
+
+// @desc    Search posts
+// @route   GET /api/posts/search
+// @access  Public
+exports.searchPosts = async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please provide a search query',
+      });
+    }
+
+    const posts = await Post.find({
+      $or: [
+        { title: { $regex: q, $options: 'i' } },
+        { content: { $regex: q, $options: 'i' } },
+        { tags: { $in: [new RegExp(q, 'i')] } },
+      ],
+      isPublished: true,
+    })
+      .populate('author', 'name email avatar')
+      .populate('category', 'name slug color')
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    res.status(200).json({
+      success: true,
+      count: posts.length,
+      data: posts,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Server Error',
+    });
+  }
+};
